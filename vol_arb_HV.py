@@ -334,7 +334,7 @@ def plot_snapshot(df: pd.DataFrame,
         return
 
     # ── limit for readability ───────────────────────────────
-    df = df[df["ticker"].isin(portfolio["ticker"])].copy()
+    df = df.head(40)
 
     # Precompute sets (faster than repeated filtering)
     long_set = set(portfolio[portfolio["position"] == "LONG STRADDLE"]["ticker"])
