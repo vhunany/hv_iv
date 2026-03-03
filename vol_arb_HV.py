@@ -30,16 +30,31 @@ import seaborn as sns
 import os
 from typing import Optional
 
+import requests
+
+no_dividend_tickers = pd.read_csv("sp500_no_dividends.csv", header=None)[0].tolist()
 
 # ─────────────────────────────────────────────
 # CONFIGURATION
 # ─────────────────────────────────────────────
+
+# CONFIG = {
+#     "tickers": [                        # Universe of underlyings to scan
+#         "SPY", "QQQ", "IWM", "GLD", "TLT",
+#         "AAPL", "MSFT", "AMZN", "GOOGL", "META",
+#         "NVDA", "TSLA", "JPM", "BAC", "XOM",
+#     ],
+#     "hv_window": 21,                    # Trading days for Historical Volatility (1-month)
+#     "hv_annualize": 252,                # Trading days in a year
+#     "iv_moneyness_tol": 0.03,           # ATM tolerance: |K/S - 1| <= this value
+#     "top_decile_n": 1,                  # Number of top/bottom deciles to trade
+#     "notional_per_straddle": 10_000,    # $ notional per straddle leg
+#     "risk_free_rate": 0.05,             # Used for BSM delta (not HV/IV calc)
+#     "results_dir": ".",
+# }
+
 CONFIG = {
-    "tickers": [                        # Universe of underlyings to scan
-        "SPY", "QQQ", "IWM", "GLD", "TLT",
-        "AAPL", "MSFT", "AMZN", "GOOGL", "META",
-        "NVDA", "TSLA", "JPM", "BAC", "XOM",
-    ],
+    "tickers": no_dividend_tickers,
     "hv_window": 21,                    # Trading days for Historical Volatility (1-month)
     "hv_annualize": 252,                # Trading days in a year
     "iv_moneyness_tol": 0.03,           # ATM tolerance: |K/S - 1| <= this value
@@ -48,9 +63,6 @@ CONFIG = {
     "risk_free_rate": 0.05,             # Used for BSM delta (not HV/IV calc)
     "results_dir": ".",
 }
-
-
-
 
 
 # ─────────────────────────────────────────────
@@ -313,53 +325,91 @@ def build_portfolio(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
 # VISUALIZATION
 # ─────────────────────────────────────────────
 
-def plot_snapshot(df: pd.DataFrame, portfolio: pd.DataFrame,
+def plot_snapshot(df: pd.DataFrame,
+                  portfolio: pd.DataFrame,
                   as_of_date: datetime):
-    """Bar chart of HV-IV spreads colored by decile and position."""
+    """Bar chart of HV-IV spreads colored by position."""
+
     if df.empty:
         return
 
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    # ── limit for readability ───────────────────────────────
+    df = df[df["ticker"].isin(portfolio["ticker"])].copy()
+
+    # Precompute sets (faster than repeated filtering)
+    long_set = set(portfolio[portfolio["position"] == "LONG STRADDLE"]["ticker"])
+    short_set = set(portfolio[portfolio["position"] == "SHORT STRADDLE"]["ticker"])
+
+    # ── figure layout ───────────────────────────────────────
+    fig, axes = plt.subplots(1, 2, figsize=(16, 14))
     fig.suptitle(
         f"HV vs IV Analysis  |  {as_of_date.strftime('%B %Y')}",
-        fontsize=14, fontweight="bold"
+        fontsize=14,
+        fontweight="bold"
     )
 
     # ── Left: spread bar chart ──────────────────────────────
     ax = axes[0]
-    colors = []
-    for _, row in df.iterrows():
-        if row["ticker"] in portfolio[portfolio["position"] == "LONG STRADDLE"]["ticker"].values:
-            colors.append("#2ecc71")     # green = buy vol
-        elif row["ticker"] in portfolio[portfolio["position"] == "SHORT STRADDLE"]["ticker"].values:
-            colors.append("#e74c3c")     # red = sell vol
-        else:
-            colors.append("#95a5a6")     # grey = flat
 
-    bars = ax.barh(df["ticker"], df["spread"] * 100, color=colors, edgecolor="white")
+    colors = []
+    for ticker in df["ticker"]:
+        if ticker in long_set:
+            colors.append("#2ecc71")   # green = buy vol
+        elif ticker in short_set:
+            colors.append("#e74c3c")   # red = sell vol
+        else:
+            colors.append("#95a5a6")   # grey = flat
+
+    ax.barh(
+        df["ticker"],
+        df["spread"] * 100,
+        color=colors,
+        edgecolor="white"
+    )
+
     ax.axvline(0, color="black", linewidth=0.8, linestyle="--")
     ax.set_xlabel("HV − IV  (%)")
     ax.set_title("Spread by Ticker  (green=Long, red=Short)")
     ax.invert_yaxis()
 
-    # ── Right: decile heatmap ───────────────────────────────
+    ax.tick_params(axis="y", labelsize=6)
+    ax.tick_params(axis="x", labelsize=8)
+
+    # ── Right: HV vs IV heatmap ─────────────────────────────
     ax2 = axes[1]
-    pivot = df[["ticker", "HV", "IV", "decile"]].set_index("ticker")
+
+    pivot = df[["ticker", "HV", "IV"]].set_index("ticker")
+
+    import seaborn as sns
     sns.heatmap(
-        pivot[["HV", "IV"]].multiply(100).round(1),
-        annot=True, fmt=".1f", cmap="RdYlGn",
-        linewidths=0.5, ax=ax2, cbar_kws={"label": "Volatility (%)"}
+        pivot.multiply(100).round(1),
+        annot=True,
+        fmt=".1f",
+        cmap="RdYlGn",
+        linewidths=0.5,
+        ax=ax2,
+        cbar_kws={"label": "Volatility (%)"}
     )
+
     ax2.set_title("HV vs IV Heatmap")
+    ax2.tick_params(axis="y", labelsize=6)
+    ax2.tick_params(axis="x", labelsize=8)
 
     plt.tight_layout()
-    save_dir = os.path.expanduser("~/hv_iv_strategy")
+
+    # ── save inside project folder ──────────────────────────
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    save_dir = os.path.join(base_dir, "outputs")
     os.makedirs(save_dir, exist_ok=True)
-    fname = os.path.join(save_dir, f"hv_iv_snapshot_{as_of_date.strftime('%Y%m')}.png")
+
+    fname = os.path.join(
+        save_dir,
+        f"hv_iv_snapshot_{as_of_date.strftime('%Y%m')}.png"
+    )
+
     plt.savefig(fname, dpi=150, bbox_inches="tight")
     print(f"\n  Chart saved → {fname}")
     plt.close()
-
 
 # ─────────────────────────────────────────────
 # BACKTESTING LOOP  (multi-month)
